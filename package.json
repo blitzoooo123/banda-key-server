@@ -1,8 +1,12 @@
 {
-  "name": "my-secure-key-server",
+  "name": "enhanced-key-server",
   "version": "1.0.0",
-  "description": "A simple serverless function to retrieve the AES key.",
+  "description": "Vercel server for secure key retrieval and server tracking.",
+  "main": "api/key.js",
   "scripts": {
     "start": "node api/key.js"
+  },
+  "dependencies": {
+    "mongodb": "^6.3.0" 
   }
 }
