@@ -1,0 +1,8 @@
+{
+  "name": "my-secure-key-server",
+  "version": "1.0.0",
+  "description": "A simple serverless function to retrieve the AES key.",
+  "scripts": {
+    "start": "node api/key.js"
+  }
+}
