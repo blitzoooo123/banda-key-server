@@ -22,23 +22,34 @@ module.exports = async (req, res) => {
         return res.status(401).json({ status: "error", message: "Unauthorized." });
     }
 
-    // 2. استخراج المعرف الفريد (Server ID)
-    const serverId = req.query.server_id;
-    if (!serverId) {
-        // إذا لم يرسل البلجن المعرف، نرسل المفتاح لتجنب التعطيل
-        return res.status(200).json({ status: "success", key: AES_KEY, warning: "Tracking skipped: Missing server_id." });
+    // 2. استخراج كلا المعرفين
+    const serverId = req.query.server_id; 
+    const processorId = req.query.processor_id; 
+
+    // إذا لم يتم إرسال أي من المعرفين، نرسل المفتاح بتحذير
+    if (!serverId || !processorId) {
+        return res.status(200).json({ 
+            status: "success", 
+            key: AES_KEY, 
+            warning: "Tracking skipped: Missing server_id or processor_id." 
+        });
     }
 
     let client;
     try {
         client = await connectToDatabase();
-        // 🚨 تأكد من اسم قاعدة البيانات هنا 🚨
         const db = client.db("key_control_db"); 
         const blacklist = db.collection("blacklist");
         const tracking = db.collection("tracking");
 
-        // 3. التحقق من الحظر الفوري (Is Blocked?)
-        const isBlocked = await blacklist.findOne({ serverId: serverId });
+        // 3. التحقق من الحظر المزدوج (Server ID OR Processor ID) 🚨 التعديل الرئيسي هنا 🚨
+        const isBlocked = await blacklist.findOne({
+            $or: [
+                { processorId: processorId }, // حظر الجهاز (HWID/MAC)
+                { serverId: serverId }        // حظر السيرفر بالاسم
+            ]
+        }); 
+        
         if (isBlocked) {
             // إرسال كود 403 (Forbidden) ليتم تعطيل البلجن
             return res.status(403).json({ status: "blocked", message: "Access revoked by admin." });
@@ -46,9 +57,15 @@ module.exports = async (req, res) => {
 
         // 4. التحديث والتتبع في مجموعة 'tracking'
         await tracking.updateOne(
-            { serverId: serverId },
-            { $set: { lastSeen: new Date() } },
-            { upsert: true } // ينشئ سجلًا جديدًا إذا لم يجده
+            // نستخدم processorId كمعرّف أساسي للتتبع
+            { processorId: processorId }, 
+            { 
+                $set: { 
+                    lastSeen: new Date(),
+                    serverId: serverId // نخزن اسم السيرفر
+                } 
+            },
+            { upsert: true }
         );
         
         // 5. إرسال المفتاح
@@ -59,7 +76,6 @@ module.exports = async (req, res) => {
 
     } catch (error) {
         console.error("Database or Server Error:", error);
-        // في حالة فشل الاتصال بـ DB، نرسل المفتاح كإجراء أمان لمنع تعطل السيرفر
         return res.status(200).json({ status: "success", key: AES_KEY, warning: "DB connection failed, key granted." });
     }
 };
