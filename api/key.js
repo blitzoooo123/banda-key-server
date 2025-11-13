@@ -42,11 +42,11 @@ module.exports = async (req, res) => {
         const blacklist = db.collection("blacklist");
         const tracking = db.collection("tracking");
 
-        // 3. التحقق من الحظر المزدوج (Server ID OR Processor ID) 🚨 التعديل الرئيسي هنا 🚨
+        // 3. التحقق من الحظر المزدوج (Server ID OR Processor ID)
         const isBlocked = await blacklist.findOne({
             $or: [
                 { processorId: processorId }, // حظر الجهاز (HWID/MAC)
-                { serverId: serverId }        // حظر السيرفر بالاسم
+                { serverId: serverId }      // حظر السيرفر بالاسم
             ]
         }); 
         
@@ -56,22 +56,31 @@ module.exports = async (req, res) => {
         }
 
         // 4. التحديث والتتبع في مجموعة 'tracking'
-        await tracking.updateOne(
+        // 💡 نستخدم findOneAndUpdate للحصول على السجل بعد التحديث 💡
+        const trackingDocResult = await tracking.findOneAndUpdate(
             // نستخدم processorId كمعرّف أساسي للتتبع
             { processorId: processorId }, 
             { 
                 $set: { 
                     lastSeen: new Date(),
                     serverId: serverId // نخزن اسم السيرفر
+                    // 🚨 يجب أن يكون 'minecraftPlayerName' موجوداً بالفعل في السجل
                 } 
             },
-            { upsert: true }
+            { upsert: true, returnDocument: 'after' } // 💡 هذا يضمن عودة السجل بعد التحديث
         );
         
-        // 5. إرسال المفتاح
+        // 💡 استخراج اسم اللاعب
+        // نفترض أن اسم اللاعب مخزن في الحقل 'minecraftPlayerName' في سجل التتبع
+        const playerNameValue = trackingDocResult.value && trackingDocResult.value.minecraftPlayerName 
+            ? trackingDocResult.value.minecraftPlayerName 
+            : serverId; // اسم السيرفر كبديل في حال عدم وجود اسم لاعب
+
+        // 5. إرسال المفتاح واسم اللاعب
         return res.status(200).json({ 
             status: "success", 
-            key: AES_KEY 
+            key: AES_KEY,
+            player_name: playerNameValue // <<< تم إضافة الحقل المطلوب
         });
 
     } catch (error) {
