@@ -9,7 +9,6 @@ let dbClient = null;
 
 async function connectToDatabase() {
     if (dbClient) return dbClient;
-    
     dbClient = await MongoClient.connect(URI);
     return dbClient;
 }
@@ -39,7 +38,6 @@ module.exports = async (req, res) => {
         // المتغيرات الثابتة لعملية الاشتراك
         const GRACE_PERIOD_DAYS = 3;
         const MS_PER_DAY = 1000 * 60 * 60 * 24;
-        const INITIAL_SECURITY_MS = 3000; // 3 ثواني مهلة أولية
 
         // 3. التحقق من الحظر
         const isBlocked = await blacklist.findOne({ $or: [{ processorId: processorId }, { serverId: serverId }] }); 
@@ -47,55 +45,52 @@ module.exports = async (req, res) => {
             return res.status(403).json({ status: "blocked", message: "Access revoked by admin." });
         }
 
-        // 4. التحديث والتتبع والحصول على بيانات الاشتراك
-        
-        // 💡 يتم تعيين تاريخ الانتهاء بعد 3 ثواني، وسيُستخدم فقط عند الإنشاء الجديد
-        const initialExpiryDate = new Date(Date.now() + INITIAL_SECURITY_MS); 
-        
-        // 🚨 التعديل الحاسم: دمج $setOnInsert
+        // 4. التحديث والتتبع (تحديث الاسم والظهور فقط)
+        // 🚨 هنا التغيير: لا نقوم بإضافة expiryDate تلقائياً أبداً. التحكم لك في Atlas فقط.
         const trackingDocResult = await tracking.findOneAndUpdate(
             { processorId: processorId }, 
-            { 
-                $set: { lastSeen: new Date(), serverId: serverId },
-                $setOnInsert: { expiryDate: initialExpiryDate } // 👈 سيتم تعيينه فقط إذا كانت الوثيقة جديدة
-            },
+            { $set: { lastSeen: new Date(), serverId: serverId } },
             { upsert: true, returnDocument: 'after' }
         );
         
         const trackingDoc = trackingDocResult.value;
-        let expiryDate = trackingDoc.expiryDate; 
+        const expiryDate = trackingDoc.expiryDate; 
 
-        // 💡 معالجة الوثائق القديمة التي تفتقر للتاريخ (المشكلة الأصلية)
+        // 5. التحقق من وجود التاريخ في Atlas
         if (!expiryDate) {
-             // إذا كان التاريخ لا يزال مفقوداً، نعتبره منتهي الصلاحية قبل فترة السماح 
-             // وهذا يجبر البلجن على التدمير الذاتي (405) حتى يتم التعديل يدوياً.
-             expiryDate = new Date(Date.now() - (GRACE_PERIOD_DAYS * MS_PER_DAY) - 1); 
+            // 🛑 إذا لم تضع أنت التاريخ بيدك في Atlas، لن يعمل السيرفر.
+            return res.status(403).json({ 
+                status: "setup_required", 
+                message: "No expiry date set in Atlas. Please set 'expiryDate' manually.",
+                remaining_days: 0 
+            });
         }
         
+        // 6. حساب الأيام المتبقية
         let status = 200; 
-        let remainingDays = 999;
+        let remainingDays = 0;
         
         const now = new Date();
         const timeDifference = expiryDate.getTime() - now.getTime();
         remainingDays = Math.ceil(timeDifference / MS_PER_DAY); 
         
         if (remainingDays <= 0) {
-            // انتهى الاشتراك، نحسب فترة السماح
+            // انتهى الاشتراك، نحسب فترة السماح (3 أيام)
             const graceExpiryDate = new Date(expiryDate.getTime() + (GRACE_PERIOD_DAYS * MS_PER_DAY));
             const timeUntilGraceEnds = graceExpiryDate.getTime() - now.getTime();
             remainingDays = Math.ceil(timeUntilGraceEnds / MS_PER_DAY);
             
             if (remainingDays > 0) {
-                // 🚨 داخل فترة السماح
+                // ⚠️ داخل فترة السماح
                 status = 200; 
             } else {
-                // 🚨 انتهت فترة السماح! تدمير ذاتي
+                // 💀 انتهت فترة السماح! تدمير ذاتي
                 status = 405; 
                 remainingDays = 0;
             }
         }
         
-        // 5. إرسال المفتاح
+        // 7. إرسال الرد للبلجن
         if (status === 405) {
             return res.status(405).json({ 
                 status: "self_destruct", 
