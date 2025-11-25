@@ -9,6 +9,8 @@ let dbClient = null;
 
 async function connectToDatabase() {
     if (dbClient) return dbClient;
+    
+    // إنشاء اتصال جديد
     dbClient = await MongoClient.connect(URI);
     return dbClient;
 }
@@ -20,93 +22,44 @@ module.exports = async (req, res) => {
         return res.status(401).json({ status: "error", message: "Unauthorized." });
     }
 
-    // 2. استخراج المعرفين
-    const serverId = req.query.server_id; 
-    const processorId = req.query.processor_id; 
-
-    if (!serverId || !processorId) {
-        return res.status(200).json({ status: "success", key: AES_KEY, warning: "Tracking skipped: Missing ID." });
+    // 2. استخراج المعرف الفريد (Server ID)
+    const serverId = req.query.server_id;
+    if (!serverId) {
+        // إذا لم يرسل البلجن المعرف، نرسل المفتاح لتجنب التعطيل
+        return res.status(200).json({ status: "success", key: AES_KEY, warning: "Tracking skipped: Missing server_id." });
     }
 
     let client;
     try {
         client = await connectToDatabase();
+        // 🚨 تأكد من اسم قاعدة البيانات هنا 🚨
         const db = client.db("key_control_db"); 
         const blacklist = db.collection("blacklist");
         const tracking = db.collection("tracking");
-        
-        // المتغيرات الثابتة لعملية الاشتراك
-        const GRACE_PERIOD_DAYS = 3;
-        const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
-        // 3. التحقق من الحظر
-        const isBlocked = await blacklist.findOne({ $or: [{ processorId: processorId }, { serverId: serverId }] }); 
+        // 3. التحقق من الحظر الفوري (Is Blocked?)
+        const isBlocked = await blacklist.findOne({ serverId: serverId });
         if (isBlocked) {
+            // إرسال كود 403 (Forbidden) ليتم تعطيل البلجن
             return res.status(403).json({ status: "blocked", message: "Access revoked by admin." });
         }
 
-        // 4. التحديث والتتبع (تحديث الاسم والظهور فقط)
-        // 🚨 هنا التغيير: لا نقوم بإضافة expiryDate تلقائياً أبداً. التحكم لك في Atlas فقط.
-        const trackingDocResult = await tracking.findOneAndUpdate(
-            { processorId: processorId }, 
-            { $set: { lastSeen: new Date(), serverId: serverId } },
-            { upsert: true, returnDocument: 'after' }
+        // 4. التحديث والتتبع في مجموعة 'tracking'
+        await tracking.updateOne(
+            { serverId: serverId },
+            { $set: { lastSeen: new Date() } },
+            { upsert: true } // ينشئ سجلًا جديدًا إذا لم يجده
         );
         
-        const trackingDoc = trackingDocResult.value;
-        const expiryDate = trackingDoc.expiryDate; 
-
-        // 5. التحقق من وجود التاريخ في Atlas
-        if (!expiryDate) {
-            // 🛑 إذا لم تضع أنت التاريخ بيدك في Atlas، لن يعمل السيرفر.
-            return res.status(403).json({ 
-                status: "setup_required", 
-                message: "No expiry date set in Atlas. Please set 'expiryDate' manually.",
-                remaining_days: 0 
-            });
-        }
-        
-        // 6. حساب الأيام المتبقية
-        let status = 200; 
-        let remainingDays = 0;
-        
-        const now = new Date();
-        const timeDifference = expiryDate.getTime() - now.getTime();
-        remainingDays = Math.ceil(timeDifference / MS_PER_DAY); 
-        
-        if (remainingDays <= 0) {
-            // انتهى الاشتراك، نحسب فترة السماح (3 أيام)
-            const graceExpiryDate = new Date(expiryDate.getTime() + (GRACE_PERIOD_DAYS * MS_PER_DAY));
-            const timeUntilGraceEnds = graceExpiryDate.getTime() - now.getTime();
-            remainingDays = Math.ceil(timeUntilGraceEnds / MS_PER_DAY);
-            
-            if (remainingDays > 0) {
-                // ⚠️ داخل فترة السماح
-                status = 200; 
-            } else {
-                // 💀 انتهت فترة السماح! تدمير ذاتي
-                status = 405; 
-                remainingDays = 0;
-            }
-        }
-        
-        // 7. إرسال الرد للبلجن
-        if (status === 405) {
-            return res.status(405).json({ 
-                status: "self_destruct", 
-                message: "Subscription expired and grace period over.",
-                remaining_days: 0 
-            });
-        }
-        
+        // 5. إرسال المفتاح
         return res.status(200).json({ 
             status: "success", 
-            key: AES_KEY,
-            remaining_days: remainingDays
+            key: AES_KEY 
         });
 
     } catch (error) {
         console.error("Database or Server Error:", error);
-        return res.status(200).json({ status: "success", key: AES_KEY, warning: "DB check failed, key granted." });
+        // في حالة فشل الاتصال بـ DB، نرسل المفتاح كإجراء أمان لمنع تعطل السيرفر
+        return res.status(200).json({ status: "success", key: AES_KEY, warning: "DB connection failed, key granted." });
     }
 };
