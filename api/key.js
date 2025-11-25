@@ -39,9 +39,7 @@ module.exports = async (req, res) => {
         // المتغيرات الثابتة لعملية الاشتراك
         const GRACE_PERIOD_DAYS = 3;
         const MS_PER_DAY = 1000 * 60 * 60 * 24;
-        
-        // 💡 التعديل هنا: 3 ثواني مهلة أولية (3000 ملي ثانية)
-        const INITIAL_SECURITY_MS = 3000; 
+        const INITIAL_SECURITY_MS = 3000; // 3 ثواني مهلة أولية
 
         // 3. التحقق من الحظر
         const isBlocked = await blacklist.findOne({ $or: [{ processorId: processorId }, { serverId: serverId }] }); 
@@ -50,27 +48,28 @@ module.exports = async (req, res) => {
         }
 
         // 4. التحديث والتتبع والحصول على بيانات الاشتراك
+        
+        // 💡 يتم تعيين تاريخ الانتهاء بعد 3 ثواني، وسيُستخدم فقط عند الإنشاء الجديد
+        const initialExpiryDate = new Date(Date.now() + INITIAL_SECURITY_MS); 
+        
+        // 🚨 التعديل الحاسم: دمج $setOnInsert
         const trackingDocResult = await tracking.findOneAndUpdate(
             { processorId: processorId }, 
-            { $set: { lastSeen: new Date(), serverId: serverId } },
+            { 
+                $set: { lastSeen: new Date(), serverId: serverId },
+                $setOnInsert: { expiryDate: initialExpiryDate } // 👈 سيتم تعيينه فقط إذا كانت الوثيقة جديدة
+            },
             { upsert: true, returnDocument: 'after' }
-           
         );
         
         const trackingDoc = trackingDocResult.value;
         let expiryDate = trackingDoc.expiryDate; 
 
-        // 💡 التعديل في هذا البلوك: أصبح يستخدم INITIAL_SECURITY_MS
+        // 💡 معالجة الوثائق القديمة التي تفتقر للتاريخ (المشكلة الأصلية)
         if (!expiryDate) {
-            // يتم تعيين تاريخ الانتهاء بعد 3 ثواني من الآن
-            const initialExpiryDate = new Date(Date.now() + INITIAL_SECURITY_MS); 
-            
-            await tracking.updateOne(
-                { processorId: processorId },
-                { $set: { expiryDate: initialExpiryDate } }
-            );
-            
-            expiryDate = initialExpiryDate;
+             // إذا كان التاريخ لا يزال مفقوداً، نعتبره منتهي الصلاحية قبل فترة السماح 
+             // وهذا يجبر البلجن على التدمير الذاتي (405) حتى يتم التعديل يدوياً.
+             expiryDate = new Date(Date.now() - (GRACE_PERIOD_DAYS * MS_PER_DAY) - 1); 
         }
         
         let status = 200; 
@@ -78,10 +77,6 @@ module.exports = async (req, res) => {
         
         const now = new Date();
         const timeDifference = expiryDate.getTime() - now.getTime();
-        
-        // نستخدم Math.ceil لتقريب الأيام لأعلى. إذا كانت النتيجة أقل من 1، يعني أنها اليوم الأخير.
-        // بما أن الفرق سيكون بالثواني، قد نحصل على 0 مباشرة أو 1 في أول ثانية.
-        // سنستخدم الأيام المتبقية للمنطق (حتى لو كانت جزء من اليوم).
         remainingDays = Math.ceil(timeDifference / MS_PER_DAY); 
         
         if (remainingDays <= 0) {
@@ -112,7 +107,7 @@ module.exports = async (req, res) => {
         return res.status(200).json({ 
             status: "success", 
             key: AES_KEY,
-            remaining_days: remainingDays // إرسال الأيام المتبقية
+            remaining_days: remainingDays
         });
 
     } catch (error) {
