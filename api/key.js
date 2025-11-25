@@ -39,7 +39,9 @@ module.exports = async (req, res) => {
         // المتغيرات الثابتة لعملية الاشتراك
         const GRACE_PERIOD_DAYS = 3;
         const MS_PER_DAY = 1000 * 60 * 60 * 24;
-        const INITIAL_SECURITY_DAYS = 7; // 💡 7 أيام مهلة أولية إذا لم يتم تعيين تاريخ
+        
+        // 💡 التعديل هنا: 3 ثواني مهلة أولية (3000 ملي ثانية)
+        const INITIAL_SECURITY_MS = 3000; 
 
         // 3. التحقق من الحظر
         const isBlocked = await blacklist.findOne({ $or: [{ processorId: processorId }, { serverId: serverId }] }); 
@@ -56,11 +58,12 @@ module.exports = async (req, res) => {
         );
         
         const trackingDoc = trackingDocResult.value;
-        let expiryDate = trackingDoc.expiryDate; // 🚨 تم تغيير التعريف إلى let
+        let expiryDate = trackingDoc.expiryDate; 
 
-        // 💡 التعديل الجديد: تعيين تاريخ انتهاء أولي إذا لم يكن موجوداً
+        // 💡 التعديل في هذا البلوك: أصبح يستخدم INITIAL_SECURITY_MS
         if (!expiryDate) {
-            const initialExpiryDate = new Date(Date.now() + (INITIAL_SECURITY_DAYS * MS_PER_DAY));
+            // يتم تعيين تاريخ الانتهاء بعد 3 ثواني من الآن
+            const initialExpiryDate = new Date(Date.now() + INITIAL_SECURITY_MS); 
             
             await tracking.updateOne(
                 { processorId: processorId },
@@ -73,10 +76,13 @@ module.exports = async (req, res) => {
         let status = 200; 
         let remainingDays = 999;
         
-        // 💡 الآن يمكننا الاعتماد على وجود expiryDate دائماً
         const now = new Date();
         const timeDifference = expiryDate.getTime() - now.getTime();
-        remainingDays = Math.ceil(timeDifference / MS_PER_DAY);
+        
+        // نستخدم Math.ceil لتقريب الأيام لأعلى. إذا كانت النتيجة أقل من 1، يعني أنها اليوم الأخير.
+        // بما أن الفرق سيكون بالثواني، قد نحصل على 0 مباشرة أو 1 في أول ثانية.
+        // سنستخدم الأيام المتبقية للمنطق (حتى لو كانت جزء من اليوم).
+        remainingDays = Math.ceil(timeDifference / MS_PER_DAY); 
         
         if (remainingDays <= 0) {
             // انتهى الاشتراك، نحسب فترة السماح
